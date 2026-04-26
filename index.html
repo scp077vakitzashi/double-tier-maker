@@ -61,6 +61,25 @@
       cursor: pointer;
     }
 
+    .color-picker {
+      position: fixed;
+      left: 50%;
+      top: 50%;
+      width: 72px;
+      height: 72px;
+      padding: 6px;
+      border: 1px solid #f4f4f4;
+      border-radius: 12px;
+      background: #171815;
+      transform: translate(-50%, -50%);
+      cursor: pointer;
+      z-index: 10;
+    }
+
+    .color-picker.hidden {
+      display: none;
+    }
+
     canvas {
       display: block;
       width: 100vw;
@@ -85,6 +104,9 @@
     </label>
 
     <button id="exportButton" class="file-button" type="button">Экспорт PNG</button>
+    <button id="addLeftTierButton" class="file-button" type="button">+L tier</button>
+    <button id="addRightTierButton" class="file-button" type="button">+R tier</button>
+    <input id="tierColorInput" class="color-picker hidden" type="color" />
   </div>
 
   <canvas id="canvas"></canvas>
@@ -94,10 +116,13 @@
     const ctx = canvas.getContext('2d');
     const fileInput = document.getElementById('fileInput');
     const exportButton = document.getElementById('exportButton');
+    const addLeftTierButton = document.getElementById('addLeftTierButton');
+    const addRightTierButton = document.getElementById('addRightTierButton');
+    const tierColorInput = document.getElementById('tierColorInput');
     const leftTitleInput = document.getElementById('leftTitle');
     const rightTitleInput = document.getElementById('rightTitle');
 
-    const tiers = [
+    const defaultTiers = [
       { label: 'S', color: '#ff767b' },
       { label: 'A', color: '#ffc37d' },
       { label: 'B', color: '#ffe28a' },
@@ -111,8 +136,14 @@
     const state = {
       dpr: 1,
       tierLists: [],
+      tiers: {
+        left: cloneTiers(defaultTiers),
+        right: cloneTiers(defaultTiers)
+      },
       items: [],
       dragging: null,
+      hoveredTier: null,
+      colorTarget: null,
       saveTimer: null
     };
 
@@ -131,10 +162,22 @@
       state.saveTimer = setTimeout(saveState, 250);
     }
 
+    function cloneTiers(source) {
+      return source.map(tier => ({ label: tier.label, color: tier.color }));
+    }
+
+    function getTiers(listId) {
+      return state.tiers[listId] || [];
+    }
+
     function saveState() {
       const payload = {
         leftTitle: leftTitleInput.value,
         rightTitle: rightTitleInput.value,
+        tiers: {
+          left: cloneTiers(state.tiers.left),
+          right: cloneTiers(state.tiers.right)
+        },
         items: state.items.map(item => ({
           id: item.id,
           sourceId: item.sourceId,
@@ -165,6 +208,10 @@
         const payload = JSON.parse(raw);
         leftTitleInput.value = payload.leftTitle || leftTitleInput.value;
         rightTitleInput.value = payload.rightTitle || rightTitleInput.value;
+        if (payload.tiers) {
+          state.tiers.left = cloneTiers(payload.tiers.left || defaultTiers);
+          state.tiers.right = cloneTiers(payload.tiers.right || defaultTiers);
+        }
 
         const loadedItems = payload.items || [];
         let loadedCount = 0;
@@ -194,7 +241,7 @@
             if (loadedCount === loadedItems.length) {
               normalizeOrders('pool');
               ['left', 'right'].forEach(listId => {
-                tiers.forEach((_, tierIndex) => normalizeOrders(listId, tierIndex));
+                getTiers(listId).forEach((_, tierIndex) => normalizeOrders(listId, tierIndex));
               });
               layoutTierLists();
               draw();
@@ -226,7 +273,7 @@
           y,
           w: listW,
           h: listH,
-          rowH: listH / tiers.length,
+          rowH: listH / getTiers('left').length,
           labelW: 92
         },
         {
@@ -236,13 +283,13 @@
           y,
           w: listW,
           h: listH,
-          rowH: listH / tiers.length,
+          rowH: listH / getTiers('right').length,
           labelW: 92
         }
       ];
 
       state.items.forEach(item => {
-        if (state.dragging && state.dragging.item === item) return;
+        if (state.dragging && state.dragging.type === 'item' && state.dragging.item === item) return;
         if (item.listId === 'pool') {
           if (!item.manual) placeItemIntoPool(item);
         } else {
@@ -289,11 +336,11 @@
       drawPool();
 
       state.items.forEach(item => {
-        if (state.dragging && state.dragging.item === item) return;
+        if (state.dragging && state.dragging.type === 'item' && state.dragging.item === item) return;
         drawItem(item);
       });
 
-      if (state.dragging) drawItem(state.dragging.item, true);
+      if (state.dragging && state.dragging.type === 'item') drawItem(state.dragging.item, true);
     }
 
     function drawTierList(list) {
@@ -308,9 +355,15 @@
       ctx.lineWidth = 1;
       ctx.strokeStyle = '#050505';
 
-      for (let i = 0; i < tiers.length; i++) {
+      const listTiers = getTiers(list.id);
+      for (let i = 0; i < listTiers.length; i++) {
         const rowY = list.y + i * list.rowH;
-        ctx.fillStyle = tiers[i].color;
+        const tier = listTiers[i];
+        const hovered = state.hoveredTier
+          && state.hoveredTier.listId === list.id
+          && state.hoveredTier.tierIndex === i;
+
+        ctx.fillStyle = tier.color;
         ctx.fillRect(list.x, rowY, list.labelW, list.rowH);
         ctx.fillStyle = '#171815';
         ctx.fillRect(list.x + list.labelW, rowY, list.w - list.labelW, list.rowH);
@@ -319,12 +372,45 @@
         ctx.font = '500 18px Arial';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(tiers[i].label, list.x + list.labelW / 2, rowY + list.rowH / 2);
+        ctx.fillText(tier.label, list.x + list.labelW / 2, rowY + list.rowH / 2);
+
+        if (hovered) {
+          drawTierControls(list, i, rowY);
+        }
       }
 
       ctx.strokeStyle = '#050505';
       ctx.lineWidth = 2;
       ctx.strokeRect(list.x, list.y, list.w, list.h);
+      ctx.restore();
+    }
+
+    function drawTierControls(list, tierIndex, rowY) {
+      const buttonSize = 18;
+      const pad = 6;
+      const y = rowY + pad;
+      const deleteX = list.x + list.labelW - buttonSize - pad;
+      const colorX = deleteX - buttonSize - 5;
+
+      ctx.save();
+      ctx.fillStyle = 'rgba(0,0,0,0.62)';
+      ctx.fillRect(colorX, y, buttonSize, buttonSize);
+      ctx.fillRect(deleteX, y, buttonSize, buttonSize);
+
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(deleteX + 5, y + 5);
+      ctx.lineTo(deleteX + buttonSize - 5, y + buttonSize - 5);
+      ctx.moveTo(deleteX + buttonSize - 5, y + 5);
+      ctx.lineTo(deleteX + 5, y + buttonSize - 5);
+      ctx.stroke();
+
+      ctx.fillStyle = getTiers(list.id)[tierIndex].color;
+      ctx.fillRect(colorX + 4, y + 4, buttonSize - 8, buttonSize - 8);
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(colorX + 4, y + 4, buttonSize - 8, buttonSize - 8);
       ctx.restore();
     }
 
@@ -420,6 +506,95 @@
 
     function normalizeOrders(listId, tierIndex = null) {
       groupItems(listId, tierIndex).forEach((item, index) => item.order = index);
+    }
+
+    function nextTierLabel(listId) {
+      const used = new Set(getTiers(listId).map(tier => tier.label.toUpperCase()));
+      for (let code = 65; code <= 90; code++) {
+        const label = String.fromCharCode(code);
+        if (!used.has(label)) return label;
+      }
+      return String(getTiers(listId).length + 1);
+    }
+
+    function addTier(listId) {
+      getTiers(listId).push({ label: nextTierLabel(listId), color: '#d9d9d9' });
+      layoutTierLists();
+      draw();
+      scheduleSave();
+    }
+
+    function removeTier(listId, tierIndex) {
+      const listTiers = getTiers(listId);
+      if (listTiers.length <= 1) return;
+
+      listTiers.splice(tierIndex, 1);
+      const itemsToRemove = new Set();
+
+      state.items.forEach(item => {
+        if (item.listId !== listId) return;
+        if (item.tierIndex === tierIndex) {
+          const poolOriginal = state.items.find(other =>
+            other !== item &&
+            other.listId === 'pool' &&
+            other.sourceId === item.sourceId
+          );
+
+          if (poolOriginal) {
+            if (!poolOriginal.assignedLists) poolOriginal.assignedLists = new Set();
+            poolOriginal.assignedLists.delete(listId);
+            itemsToRemove.add(item);
+            return;
+          }
+
+          const assignedLists = new Set(['left', 'right'].filter(id =>
+            id !== listId &&
+            state.items.some(other =>
+              other !== item &&
+              other.listId === id &&
+              other.sourceId === item.sourceId
+            )
+          ));
+
+          item.listId = 'pool';
+          item.tierIndex = null;
+          item.assignedLists = assignedLists;
+          item.order = groupItems('pool').length;
+          return;
+        }
+        if (item.tierIndex > tierIndex) item.tierIndex--;
+      });
+
+      state.items = state.items.filter(item => !itemsToRemove.has(item));
+      normalizeOrders('pool');
+      getTiers(listId).forEach((_, index) => normalizeOrders(listId, index));
+      layoutTierLists();
+      draw();
+      scheduleSave();
+    }
+
+    function moveTier(listId, fromIndex, toIndex) {
+      const listTiers = getTiers(listId);
+      const targetIndex = clamp(toIndex, 0, listTiers.length - 1);
+      if (fromIndex === targetIndex) return;
+
+      const [tier] = listTiers.splice(fromIndex, 1);
+      listTiers.splice(targetIndex, 0, tier);
+
+      state.items.forEach(item => {
+        if (item.listId !== listId) return;
+        if (item.tierIndex === fromIndex) {
+          item.tierIndex = targetIndex;
+        } else if (fromIndex < targetIndex && item.tierIndex > fromIndex && item.tierIndex <= targetIndex) {
+          item.tierIndex--;
+        } else if (fromIndex > targetIndex && item.tierIndex >= targetIndex && item.tierIndex < fromIndex) {
+          item.tierIndex++;
+        }
+      });
+
+      layoutTierLists();
+      draw();
+      scheduleSave();
     }
 
     function placeItemIntoRow(item, updateOrder = true) {
@@ -579,13 +754,43 @@
       return null;
     }
 
+    function findTierHeaderAt(x, y) {
+      for (const list of state.tierLists) {
+        if (x < list.x || x > list.x + list.labelW || y < list.y || y > list.y + list.h) continue;
+        const tierIndex = clamp(Math.floor((y - list.y) / list.rowH), 0, getTiers(list.id).length - 1);
+        return { listId: list.id, tierIndex };
+      }
+      return null;
+    }
+
+    function findTierControlAt(x, y) {
+      const header = findTierHeaderAt(x, y);
+      if (!header) return null;
+
+      const list = getTierList(header.listId);
+      const rowY = list.y + header.tierIndex * list.rowH;
+      const buttonSize = 18;
+      const pad = 6;
+      const controlY = rowY + pad;
+      const deleteX = list.x + list.labelW - buttonSize - pad;
+      const colorX = deleteX - buttonSize - 5;
+
+      if (y >= controlY && y <= controlY + buttonSize) {
+        if (x >= deleteX && x <= deleteX + buttonSize) return { ...header, type: 'delete' };
+        if (x >= colorX && x <= colorX + buttonSize) return { ...header, type: 'color' };
+      }
+
+      return null;
+    }
+
     function findDropTarget(x, y) {
       for (const list of state.tierLists) {
         if (x >= list.x && x <= list.x + list.w && y >= list.y && y <= list.y + list.h) {
+          const listTiers = getTiers(list.id);
           return {
             type: 'tier',
             listId: list.id,
-            tierIndex: clamp(Math.floor((y - list.y) / list.rowH), 0, tiers.length - 1)
+            tierIndex: clamp(Math.floor((y - list.y) / list.rowH), 0, listTiers.length - 1)
           };
         }
       }
@@ -600,6 +805,38 @@
 
     canvas.addEventListener('pointerdown', event => {
       const p = getPointer(event);
+      const tierControl = findTierControlAt(p.x, p.y);
+      if (tierControl) {
+        if (tierControl.type === 'delete') {
+          removeTier(tierControl.listId, tierControl.tierIndex);
+          return;
+        }
+
+        state.colorTarget = {
+          listId: tierControl.listId,
+          tierIndex: tierControl.tierIndex
+        };
+        tierColorInput.value = getTiers(tierControl.listId)[tierControl.tierIndex].color;
+        tierColorInput.classList.remove('hidden');
+        tierColorInput.focus();
+        setTimeout(() => tierColorInput.click(), 0);
+        return;
+      }
+
+      const tierHeader = findTierHeaderAt(p.x, p.y);
+      if (tierHeader) {
+        state.dragging = {
+          type: 'tier',
+          listId: tierHeader.listId,
+          sourceTierIndex: tierHeader.tierIndex,
+          currentTierIndex: tierHeader.tierIndex
+        };
+
+        canvas.classList.add('dragging');
+        canvas.setPointerCapture(event.pointerId);
+        return;
+      }
+
       const item = findItemAt(p.x, p.y);
       if (!item) return;
 
@@ -618,6 +855,7 @@
       }
 
       state.dragging = {
+        type: 'item',
         item,
         sourceListId: item.listId,
         sourceTierIndex: item.tierIndex,
@@ -632,8 +870,25 @@
     });
 
     canvas.addEventListener('pointermove', event => {
-      if (!state.dragging) return;
       const p = getPointer(event);
+      const hoveredTier = findTierHeaderAt(p.x, p.y);
+      state.hoveredTier = hoveredTier;
+
+      if (!state.dragging) {
+        canvas.style.cursor = findTierControlAt(p.x, p.y) ? 'pointer' : '';
+        draw();
+        return;
+      }
+
+      if (state.dragging.type === 'tier') {
+        const target = findTierHeaderAt(p.x, p.y);
+        if (target && target.listId === state.dragging.listId) {
+          state.dragging.currentTierIndex = target.tierIndex;
+        }
+        draw();
+        return;
+      }
+
       const item = state.dragging.item;
       item.x = p.x - state.dragging.offsetX;
       item.y = p.y - state.dragging.offsetY;
@@ -644,6 +899,18 @@
       if (!state.dragging) return;
 
       const p = getPointer(event);
+      if (state.dragging.type === 'tier') {
+        const target = findTierHeaderAt(p.x, p.y);
+        if (target && target.listId === state.dragging.listId) {
+          moveTier(state.dragging.listId, state.dragging.sourceTierIndex, target.tierIndex);
+        }
+
+        state.dragging = null;
+        canvas.classList.remove('dragging');
+        draw();
+        return;
+      }
+
       const item = state.dragging.item;
       const target = findDropTarget(p.x, p.y);
 
@@ -672,7 +939,7 @@
     });
 
     canvas.addEventListener('pointercancel', () => {
-      if (state.dragging) {
+      if (state.dragging && state.dragging.type === 'item') {
         const item = state.dragging.item;
         reorderItem(item, state.dragging.sourceListId, state.dragging.sourceTierIndex, item.x, item.y);
       }
@@ -684,6 +951,37 @@
     fileInput.addEventListener('change', event => {
       handleFiles(event.target.files);
       fileInput.value = '';
+    });
+
+    addLeftTierButton.addEventListener('click', () => addTier('left'));
+    addRightTierButton.addEventListener('click', () => addTier('right'));
+
+    tierColorInput.addEventListener('input', () => {
+      if (!state.colorTarget) return;
+      const { listId, tierIndex } = state.colorTarget;
+      const tier = getTiers(listId)[tierIndex];
+      if (!tier) return;
+      tier.color = tierColorInput.value;
+      draw();
+      scheduleSave();
+    });
+
+    tierColorInput.addEventListener('change', () => {
+      state.colorTarget = null;
+      tierColorInput.classList.add('hidden');
+    });
+
+    tierColorInput.addEventListener('keydown', event => {
+      if (event.key !== 'Escape') return;
+      state.colorTarget = null;
+      tierColorInput.classList.add('hidden');
+    });
+
+    canvas.addEventListener('pointerleave', () => {
+      if (state.dragging) return;
+      state.hoveredTier = null;
+      canvas.style.cursor = '';
+      draw();
     });
 
     leftTitleInput.addEventListener('input', () => {
