@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Double Tier List Canvas</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: #10110f;
+      color: #f4f4f4;
+      font-family: Arial, Helvetica, sans-serif;
+      overflow: hidden;
+    }
+
+    .toolbar {
+      height: 72px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 14px 18px;
+      background: #171815;
+      border-bottom: 1px solid #2b2d27;
+    }
+
+    .title-input {
+      width: 230px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid #33362f;
+      background: #0f100e;
+      color: #ffffff;
+      outline: none;
+      font-size: 14px;
+    }
+
+    .file-button {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      height: 42px;
+      padding: 0 18px;
+      border-radius: 12px;
+      background: #f4f4f4;
+      color: #111;
+      font-weight: 700;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .file-button input {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+    }
+
+    canvas {
+      display: block;
+      width: 100vw;
+      height: calc(100vh - 72px);
+      background: #121310;
+      cursor: grab;
+    }
+
+    canvas.dragging {
+      cursor: grabbing;
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <input id="leftTitle" class="title-input" value="Левый тир-лист" placeholder="Заголовок слева" />
+    <input id="rightTitle" class="title-input" value="Правый тир-лист" placeholder="Заголовок справа" />
+
+    <label class="file-button">
+      Загрузить картинки
+      <input id="fileInput" type="file" accept="image/*" multiple />
+    </label>
+
+    <button id="exportButton" class="file-button" type="button">Экспорт PNG</button>
+  </div>
+
+  <canvas id="canvas"></canvas>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const fileInput = document.getElementById('fileInput');
+    const exportButton = document.getElementById('exportButton');
+    const leftTitleInput = document.getElementById('leftTitle');
+    const rightTitleInput = document.getElementById('rightTitle');
+
+    const tiers = [
+      { label: 'S', color: '#ff767b' },
+      { label: 'A', color: '#ffc37d' },
+      { label: 'B', color: '#ffe28a' },
+      { label: 'C', color: '#fbff79' },
+      { label: 'D', color: '#b7ff78' },
+      { label: 'F', color: '#7bdcff' }
+    ];
+
+    const STORAGE_KEY = 'double-tier-list-canvas-state-v1';
+
+    const state = {
+      dpr: 1,
+      tierLists: [],
+      items: [],
+      dragging: null,
+      saveTimer: null
+    };
+
+    function resizeCanvas() {
+      state.dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = Math.floor(rect.width * state.dpr);
+      canvas.height = Math.floor(rect.height * state.dpr);
+      ctx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
+      layoutTierLists();
+      draw();
+    }
+
+    function scheduleSave() {
+      clearTimeout(state.saveTimer);
+      state.saveTimer = setTimeout(saveState, 250);
+    }
+
+    function saveState() {
+      const payload = {
+        leftTitle: leftTitleInput.value,
+        rightTitle: rightTitleInput.value,
+        items: state.items.map(item => ({
+          id: item.id,
+          sourceId: item.sourceId,
+          src: item.img.src,
+          listId: item.listId,
+          tierIndex: item.tierIndex,
+          order: item.order,
+          assignedLists: item.assignedLists ? [...item.assignedLists] : [],
+          x: item.x,
+          y: item.y,
+          size: item.size,
+          manual: item.manual
+        }))
+      };
+
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+      } catch (error) {
+        console.warn('Не удалось сохранить состояние:', error);
+      }
+    }
+
+    function loadState() {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return;
+
+      try {
+        const payload = JSON.parse(raw);
+        leftTitleInput.value = payload.leftTitle || leftTitleInput.value;
+        rightTitleInput.value = payload.rightTitle || rightTitleInput.value;
+
+        const loadedItems = payload.items || [];
+        let loadedCount = 0;
+
+        if (!loadedItems.length) return;
+
+        loadedItems.forEach(saved => {
+          const img = new Image();
+          img.onload = () => {
+            const item = {
+              id: saved.id,
+              sourceId: saved.sourceId || saved.id,
+              img,
+              listId: saved.listId || 'pool',
+              tierIndex: saved.tierIndex ?? null,
+              assignedLists: new Set(saved.assignedLists || []),
+              order: Number.isFinite(saved.order) ? saved.order : 0,
+              x: saved.x || 0,
+              y: saved.y || 0,
+              size: saved.size || 78,
+              manual: !!saved.manual
+            };
+
+            state.items.push(item);
+            loadedCount++;
+
+            if (loadedCount === loadedItems.length) {
+              normalizeOrders('pool');
+              ['left', 'right'].forEach(listId => {
+                tiers.forEach((_, tierIndex) => normalizeOrders(listId, tierIndex));
+              });
+              layoutTierLists();
+              draw();
+            }
+          };
+          img.src = saved.src;
+        });
+      } catch (error) {
+        console.warn('Не удалось восстановить состояние:', error);
+      }
+    }
+
+    function layoutTierLists() {
+      const w = canvas.clientWidth;
+      const h = canvas.clientHeight;
+      const gap = 28;
+      const outerPad = 22;
+      const titleH = 52;
+      const poolH = Math.max(130, Math.min(210, h * 0.24));
+      const listW = (w - outerPad * 2 - gap) / 2;
+      const listH = Math.max(330, h - outerPad * 3 - titleH - poolH);
+      const y = outerPad + titleH;
+
+      state.tierLists = [
+        {
+          id: 'left',
+          title: leftTitleInput.value || 'Левый тир-лист',
+          x: outerPad,
+          y,
+          w: listW,
+          h: listH,
+          rowH: listH / tiers.length,
+          labelW: 92
+        },
+        {
+          id: 'right',
+          title: rightTitleInput.value || 'Правый тир-лист',
+          x: outerPad + listW + gap,
+          y,
+          w: listW,
+          h: listH,
+          rowH: listH / tiers.length,
+          labelW: 92
+        }
+      ];
+
+      state.items.forEach(item => {
+        if (state.dragging && state.dragging.item === item) return;
+        if (item.listId === 'pool') {
+          if (!item.manual) placeItemIntoPool(item);
+        } else {
+          placeItemIntoRow(item, false);
+        }
+      });
+    }
+
+    function getTierList(id) {
+      return state.tierLists.find(list => list.id === id);
+    }
+
+    function getRowRect(listId, tierIndex) {
+      const list = getTierList(listId);
+      if (!list || tierIndex === null || tierIndex === undefined) return null;
+      return {
+        x: list.x + list.labelW,
+        y: list.y + tierIndex * list.rowH,
+        w: list.w - list.labelW,
+        h: list.rowH
+      };
+    }
+
+    function getPoolRect() {
+      const left = state.tierLists[0];
+      const right = state.tierLists[1];
+      if (!left || !right) return null;
+      const x = left.x;
+      const y = left.y + left.h + 22;
+      const w = right.x + right.w - left.x;
+      const h = canvas.clientHeight - y - 22;
+      return { x, y, w, h };
+    }
+
+    function draw() {
+      const w = canvas.clientWidth;
+      const h = canvas.clientHeight;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = '#121310';
+      ctx.fillRect(0, 0, w, h);
+
+      drawTierList(state.tierLists[0]);
+      drawTierList(state.tierLists[1]);
+      drawPool();
+
+      state.items.forEach(item => {
+        if (state.dragging && state.dragging.item === item) return;
+        drawItem(item);
+      });
+
+      if (state.dragging) drawItem(state.dragging.item, true);
+    }
+
+    function drawTierList(list) {
+      if (!list) return;
+      ctx.save();
+      ctx.fillStyle = '#f6f6f6';
+      ctx.font = '700 24px Arial';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(list.title, list.x + list.w / 2, list.y - 28);
+
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = '#050505';
+
+      for (let i = 0; i < tiers.length; i++) {
+        const rowY = list.y + i * list.rowH;
+        ctx.fillStyle = tiers[i].color;
+        ctx.fillRect(list.x, rowY, list.labelW, list.rowH);
+        ctx.fillStyle = '#171815';
+        ctx.fillRect(list.x + list.labelW, rowY, list.w - list.labelW, list.rowH);
+        ctx.strokeRect(list.x, rowY, list.w, list.rowH);
+        ctx.fillStyle = '#080808';
+        ctx.font = '500 18px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(tiers[i].label, list.x + list.labelW / 2, rowY + list.rowH / 2);
+      }
+
+      ctx.strokeStyle = '#050505';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(list.x, list.y, list.w, list.h);
+      ctx.restore();
+    }
+
+    function drawPool() {
+      const pool = getPoolRect();
+      if (!pool) return;
+      ctx.save();
+      ctx.fillStyle = '#171815';
+      ctx.strokeStyle = '#2d3029';
+      ctx.lineWidth = 1;
+      ctx.fillRect(pool.x, pool.y, pool.w, pool.h);
+      ctx.strokeRect(pool.x, pool.y, pool.w, pool.h);
+      ctx.fillStyle = '#8f918a';
+      ctx.font = '500 15px Arial';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText('Неназначенные картинки', pool.x + 12, pool.y + 10);
+      ctx.restore();
+    }
+
+    function drawItem(item, isDragging = false) {
+      ctx.save();
+      ctx.globalAlpha = isDragging ? 0.86 : 1;
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.45)';
+      ctx.shadowBlur = isDragging ? 18 : 8;
+      ctx.shadowOffsetY = isDragging ? 8 : 3;
+
+      roundRect(item.x, item.y, item.size, item.size, 9);
+      ctx.clip();
+
+      const img = item.img;
+      const scale = Math.max(item.size / img.width, item.size / img.height);
+      const dw = img.width * scale;
+      const dh = img.height * scale;
+      const dx = item.x + (item.size - dw) / 2;
+      const dy = item.y + (item.size - dh) / 2;
+      ctx.drawImage(img, dx, dy, dw, dh);
+      ctx.restore();
+
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+      ctx.lineWidth = 1;
+      roundRect(item.x, item.y, item.size, item.size, 9);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function roundRect(x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.lineTo(x + w - r, y);
+      ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+      ctx.lineTo(x + w, y + h - r);
+      ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+      ctx.lineTo(x + r, y + h);
+      ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+      ctx.lineTo(x, y + r);
+      ctx.quadraticCurveTo(x, y, x + r, y);
+      ctx.closePath();
+    }
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function groupItems(listId, tierIndex = null) {
+      return state.items
+        .filter(item => item.listId === listId && (tierIndex === null || item.tierIndex === tierIndex))
+        .sort((a, b) => a.order - b.order);
+    }
+
+    function normalizeOrders(listId, tierIndex = null) {
+      groupItems(listId, tierIndex).forEach((item, index) => item.order = index);
+    }
+
+    function placeItemIntoRow(item, updateOrder = true) {
+      const row = getRowRect(item.listId, item.tierIndex);
+      if (!row) return;
+
+      const pad = 8;
+      item.size = Math.min(row.h - pad * 2, 92);
+      const items = groupItems(item.listId, item.tierIndex);
+      items.forEach((it, index) => {
+        it.x = clamp(row.x + pad + index * (it.size + pad), row.x + pad, row.x + row.w - it.size - pad);
+        it.y = row.y + (row.h - it.size) / 2;
+        it.manual = false;
+        if (updateOrder) it.order = index;
+      });
+    }
+
+    function placeItemIntoPool(item) {
+      const pool = getPoolRect();
+      if (!pool) return;
+
+      const pad = 10;
+      const titleOffset = 34;
+      item.size = 78;
+      const items = groupItems('pool');
+      const cols = Math.max(1, Math.floor((pool.w - pad * 2) / (item.size + pad)));
+
+      items.forEach((it, index) => {
+        const col = index % cols;
+        const row = Math.floor(index / cols);
+        it.size = 78;
+        it.x = pool.x + pad + col * (it.size + pad);
+        it.y = pool.y + titleOffset + row * (it.size + pad);
+        it.manual = false;
+        it.order = index;
+      });
+    }
+
+    function reorderItem(item, targetListId, targetTierIndex, pointerX, pointerY) {
+      item.listId = targetListId;
+      item.tierIndex = targetTierIndex;
+
+      const collection = groupItems(targetListId, targetTierIndex).filter(it => it !== item);
+      let insertIndex = collection.length;
+
+      if (targetListId === 'pool') {
+        const pool = getPoolRect();
+        const size = 78;
+        const pad = 10;
+        const cols = Math.max(1, Math.floor((pool.w - pad * 2) / (size + pad)));
+        const col = clamp(Math.floor((pointerX - pool.x - pad) / (size + pad)), 0, cols - 1);
+        const row = Math.max(0, Math.floor((pointerY - pool.y - 34) / (size + pad)));
+        insertIndex = clamp(row * cols + col, 0, collection.length);
+      } else {
+        const rowRect = getRowRect(targetListId, targetTierIndex);
+        const size = Math.min(rowRect.h - 16, 92);
+        const pad = 8;
+        insertIndex = clamp(Math.floor((pointerX - rowRect.x - pad) / (size + pad)), 0, collection.length);
+      }
+
+      collection.splice(insertIndex, 0, item);
+      collection.forEach((it, index) => it.order = index);
+
+      if (targetListId === 'pool') placeItemIntoPool(item);
+      else placeItemIntoRow(item);
+    }
+
+    function addImage(img) {
+      const sourceId = crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random());
+      const item = {
+        id: sourceId,
+        sourceId,
+        img,
+        listId: 'pool',
+        tierIndex: null,
+        assignedLists: new Set(),
+        order: groupItems('pool').length,
+        x: 0,
+        y: 0,
+        size: 78,
+        manual: false
+      };
+      state.items.push(item);
+      placeItemIntoPool(item);
+      draw();
+      scheduleSave();
+    }
+
+    function createAssignedCopy(poolItem, target) {
+      const existing = state.items.find(item => item.sourceId === poolItem.sourceId && item.listId === target.listId);
+
+      if (existing) {
+        existing.tierIndex = target.tierIndex;
+        existing.order = groupItems(target.listId, target.tierIndex).length;
+        placeItemIntoRow(existing);
+        return existing;
+      }
+
+      const copy = {
+        id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()),
+        sourceId: poolItem.sourceId,
+        img: poolItem.img,
+        listId: target.listId,
+        tierIndex: target.tierIndex,
+        order: groupItems(target.listId, target.tierIndex).length,
+        x: 0,
+        y: 0,
+        size: 80,
+        manual: false
+      };
+
+      state.items.push(copy);
+      placeItemIntoRow(copy);
+      return copy;
+    }
+
+    function updatePoolAfterAssignment(poolItem, listId) {
+      if (!poolItem || poolItem.listId !== 'pool') return;
+      poolItem.assignedLists.add(listId);
+
+      if (poolItem.assignedLists.has('left') && poolItem.assignedLists.has('right')) {
+        state.items = state.items.filter(item => item !== poolItem);
+        normalizeOrders('pool');
+        const firstPoolItem = state.items.find(item => item.listId === 'pool');
+        if (firstPoolItem) placeItemIntoPool(firstPoolItem);
+      } else {
+        // Важно: оригинал НЕ остаётся там, где его отпустили.
+        // Он возвращается в своё место в пуле, а в тир-листе появляется копия.
+        placeItemIntoPool(poolItem);
+      }
+      scheduleSave();
+    }
+
+    function handleFiles(files) {
+      [...files].forEach(file => {
+        if (!file.type.startsWith('image/')) return;
+        const reader = new FileReader();
+        reader.onload = event => {
+          const img = new Image();
+          img.onload = () => addImage(img);
+          img.src = event.target.result;
+        };
+        reader.readAsDataURL(file);
+      });
+    }
+
+    function getPointer(event) {
+      const rect = canvas.getBoundingClientRect();
+      return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    }
+
+    function findItemAt(x, y) {
+      for (let i = state.items.length - 1; i >= 0; i--) {
+        const item = state.items[i];
+        if (x >= item.x && x <= item.x + item.size && y >= item.y && y <= item.y + item.size) return item;
+      }
+      return null;
+    }
+
+    function findDropTarget(x, y) {
+      for (const list of state.tierLists) {
+        if (x >= list.x && x <= list.x + list.w && y >= list.y && y <= list.y + list.h) {
+          return {
+            type: 'tier',
+            listId: list.id,
+            tierIndex: clamp(Math.floor((y - list.y) / list.rowH), 0, tiers.length - 1)
+          };
+        }
+      }
+
+      const pool = getPoolRect();
+      if (pool && x >= pool.x && x <= pool.x + pool.w && y >= pool.y && y <= pool.y + pool.h) {
+        return { type: 'pool', listId: 'pool', tierIndex: null };
+      }
+
+      return null;
+    }
+
+    canvas.addEventListener('pointerdown', event => {
+      const p = getPointer(event);
+      const item = findItemAt(p.x, p.y);
+      if (!item) return;
+
+      state.dragging = {
+        item,
+        sourceListId: item.listId,
+        sourceTierIndex: item.tierIndex,
+        sourceOrder: item.order,
+        offsetX: p.x - item.x,
+        offsetY: p.y - item.y
+      };
+
+      canvas.classList.add('dragging');
+      canvas.setPointerCapture(event.pointerId);
+      draw();
+    });
+
+    canvas.addEventListener('pointermove', event => {
+      if (!state.dragging) return;
+      const p = getPointer(event);
+      const item = state.dragging.item;
+      item.x = p.x - state.dragging.offsetX;
+      item.y = p.y - state.dragging.offsetY;
+      draw();
+    });
+
+    canvas.addEventListener('pointerup', event => {
+      if (!state.dragging) return;
+
+      const p = getPointer(event);
+      const item = state.dragging.item;
+      const target = findDropTarget(p.x, p.y);
+
+      if (target && target.type === 'tier') {
+        if (item.listId === 'pool') {
+          createAssignedCopy(item, target);
+          updatePoolAfterAssignment(item, target.listId);
+        } else {
+          reorderItem(item, target.listId, target.tierIndex, p.x, p.y);
+        }
+      } else if (target && target.type === 'pool') {
+        if (item.listId === 'pool') {
+          reorderItem(item, 'pool', null, p.x, p.y);
+        } else {
+          reorderItem(item, 'pool', null, p.x, p.y);
+          item.assignedLists = new Set();
+        }
+      } else {
+        reorderItem(item, state.dragging.sourceListId, state.dragging.sourceTierIndex, item.x, item.y);
+      }
+
+      state.dragging = null;
+      canvas.classList.remove('dragging');
+      draw();
+      scheduleSave();
+    });
+
+    canvas.addEventListener('pointercancel', () => {
+      if (state.dragging) {
+        const item = state.dragging.item;
+        reorderItem(item, state.dragging.sourceListId, state.dragging.sourceTierIndex, item.x, item.y);
+      }
+      state.dragging = null;
+      canvas.classList.remove('dragging');
+      draw();
+    });
+
+    fileInput.addEventListener('change', event => {
+      handleFiles(event.target.files);
+      fileInput.value = '';
+    });
+
+    leftTitleInput.addEventListener('input', () => {
+      layoutTierLists();
+      draw();
+      scheduleSave();
+    });
+
+    rightTitleInput.addEventListener('input', () => {
+      layoutTierLists();
+      draw();
+      scheduleSave();
+    });
+
+    exportButton.addEventListener('click', () => {
+      const pool = getPoolRect();
+      const exportCanvas = document.createElement('canvas');
+      const exportCtx = exportCanvas.getContext('2d');
+      const scale = 2;
+      exportCanvas.width = canvas.clientWidth * scale;
+      exportCanvas.height = (pool ? pool.y - 8 : canvas.clientHeight) * scale;
+
+      exportCtx.scale(scale, scale);
+      exportCtx.drawImage(canvas, 0, 0, canvas.clientWidth, canvas.clientHeight);
+
+      const link = document.createElement('a');
+      link.download = 'tier-list-result.png';
+      link.href = exportCanvas.toDataURL('image/png');
+      link.click();
+    });
+
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+    loadS
+  </script>
+</body>
+</html>
