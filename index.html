@@ -369,6 +369,28 @@
       ctx.lineWidth = 1;
       roundRect(item.x, item.y, item.size, item.size, 9);
       ctx.stroke();
+
+      // крестик только для пула
+      if (item.listId === 'pool') {
+        const size = 16;
+        const cx = item.x + item.size - size - 4;
+        const cy = item.y + 4;
+
+        ctx.fillStyle = 'rgba(0,0,0,0.6)';
+        ctx.fillRect(cx, cy, size, size);
+
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(cx + 4, cy + 4);
+        ctx.lineTo(cx + size - 4, cy + size - 4);
+        ctx.moveTo(cx + size - 4, cy + 4);
+        ctx.lineTo(cx + 4, cy + size - 4);
+        ctx.stroke();
+
+        item._deleteBtn = { x: cx, y: cy, size };
+      }
+
       ctx.restore();
     }
 
@@ -581,6 +603,20 @@
       const item = findItemAt(p.x, p.y);
       if (!item) return;
 
+      // проверка на клик по крестику
+      if (item.listId === 'pool' && item._deleteBtn) {
+        const b = item._deleteBtn;
+        if (p.x >= b.x && p.x <= b.x + b.size && p.y >= b.y && p.y <= b.y + b.size) {
+          state.items = state.items.filter(i => i !== item && i.sourceId !== item.sourceId);
+          normalizeOrders('pool');
+          const first = state.items.find(i => i.listId === 'pool');
+          if (first) placeItemIntoPool(first);
+          draw();
+          scheduleSave();
+          return;
+        }
+      }
+
       state.dragging = {
         item,
         sourceListId: item.listId,
@@ -681,7 +717,7 @@
 
     window.addEventListener('resize', resizeCanvas);
     resizeCanvas();
-    loadS
+    loadState();
   </script>
 </body>
 </html>
