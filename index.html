@@ -607,7 +607,7 @@
       if (item.listId === 'pool' && item._deleteBtn) {
         const b = item._deleteBtn;
         if (p.x >= b.x && p.x <= b.x + b.size && p.y >= b.y && p.y <= b.y + b.size) {
-          state.items = state.items.filter(i => i !== item && i.sourceId !== item.sourceId);
+          state.items = state.items.filter(i => i !== item);
           normalizeOrders('pool');
           const first = state.items.find(i => i.listId === 'pool');
           if (first) placeItemIntoPool(first);
